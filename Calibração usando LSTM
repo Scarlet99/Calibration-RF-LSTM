@@ -1,0 +1,575 @@
+# ============================================================
+# LSTM SIMPLES PARA CALIBRAÇÃO DE SENSORES DE BAIXO CUSTO
+# Split temporal: 60% treino / 20% validação / 20% teste
+# ============================================================
+
+import os
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score
+)
+
+from scipy.stats import pearsonr
+
+import tensorflow as tf
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (
+    LSTM,
+    Dense,
+    Dropout
+)
+
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.optimizers import Adam
+
+
+# ============================================================
+# 1. Reprodutibilidade
+# ============================================================
+
+SEED = 42
+
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+
+# ============================================================
+# 2. Carregar dataset
+# ============================================================
+
+arquivo = "envcity_preprocessado_10min_prophet_sem_gaps.csv"
+
+df = pd.read_csv(arquivo)
+
+df["time"] = pd.to_datetime(df["time"])
+
+df = df.sort_values("time").reset_index(drop=True)
+
+print("\nDimensão da base:", df.shape)
+
+print(
+    "Período:",
+    df["time"].min(),
+    "até",
+    df["time"].max()
+)
+
+
+# ============================================================
+# 3. Targets e entradas
+# ============================================================
+
+targets = {
+    "NO2": "iag_no2",
+    "CO": "iag_co",
+    "O3": "iag_o3",
+    "SO2": "iag_so2"
+}
+
+features_por_gas = {
+
+    "NO2": [
+        "e2sp_no2",
+        "e2sp_no2_2",
+        "e2sp_no2_3",
+        "e2sp_no2_we",
+        "e2sp_no2_ae",
+        "e2sp_co_we",
+        "e2sp_temp"
+    ],
+
+    "CO": [
+        "e2sp_co_3",
+        "e2sp_co_we",
+        "e2sp_co_ae",
+        "e2sp_temp"
+    ],
+
+    "O3": [
+        "e2sp_ox_we",
+        "e2sp_ox_ae",
+        "e2sp_no2_we",
+        "e2sp_co_we",
+        "e2sp_temp"
+    ],
+
+    "SO2": [
+        "e2sp_so2_2",
+        "e2sp_so2_we",
+        "e2sp_so2_ae",
+        "e2sp_co_we",
+        "e2sp_temp"
+    ]
+}
+
+
+# ============================================================
+# 4. Funções auxiliares
+# ============================================================
+
+def criar_sequencias(X, y, janela):
+
+    X_seq = []
+    y_seq = []
+
+    for i in range(janela, len(X)):
+
+        X_seq.append(X[i-janela:i])
+
+        y_seq.append(y[i])
+
+    return np.array(X_seq), np.array(y_seq)
+
+
+def calcular_metricas(y_real, y_pred):
+
+    rmse = np.sqrt(mean_squared_error(y_real, y_pred))
+
+    mse = mean_squared_error(y_real, y_pred)
+
+    mae = mean_absolute_error(y_real, y_pred)
+
+    r2 = r2_score(y_real, y_pred)
+
+    if np.std(y_real) > 0 and np.std(y_pred) > 0:
+
+        pearson = pearsonr(y_real, y_pred)[0]
+
+    else:
+
+        pearson = np.nan
+
+    return rmse, mse, mae, r2, pearson
+
+
+def criar_modelo(input_shape):
+
+    modelo = Sequential()
+
+    modelo.add(
+        LSTM(
+            32,
+            input_shape=input_shape,
+            return_sequences=False
+        )
+    )
+
+    modelo.add(Dropout(0.2))
+
+    modelo.add(Dense(16, activation="relu"))
+
+    modelo.add(Dense(1))
+
+    modelo.compile(
+        optimizer=Adam(learning_rate=0.0005),
+        loss="mse"
+    )
+
+    return modelo
+
+
+# ============================================================
+# 5. Parâmetros
+# ============================================================
+
+JANELA = 6
+
+# 6 amostras de 10 minutos = 1 hora
+
+EPOCHS = 100
+
+BATCH_SIZE = 64
+
+
+# ============================================================
+# 6. Pasta para figuras
+# ============================================================
+
+PASTA_FIGURAS = "figuras_lstm"
+
+os.makedirs(PASTA_FIGURAS, exist_ok=True)
+
+
+# ============================================================
+# 7. Treinamento por gás
+# ============================================================
+
+resultados = []
+
+previsoes_teste = {}
+
+
+for gas, target in targets.items():
+
+    print("\n" + "="*70)
+
+    print(f"TREINANDO LSTM PARA {gas}")
+
+    print("="*70)
+
+    # --------------------------------------------------------
+    # Entradas
+    # --------------------------------------------------------
+
+    features = features_por_gas[gas]
+
+    colunas = ["time"] + features + [target]
+
+    faltantes = [c for c in colunas if c not in df.columns]
+
+    if faltantes:
+
+        print("Colunas faltantes:", faltantes)
+
+        continue
+
+    dados = df[colunas].copy()
+
+    dados = dados.replace([np.inf, -np.inf], np.nan)
+
+    dados = dados.dropna().reset_index(drop=True)
+
+    X = dados[features].values
+
+    y = dados[target].values.reshape(-1, 1)
+
+    # --------------------------------------------------------
+    # Split temporal 60/20/20
+    # --------------------------------------------------------
+
+    n = len(dados)
+
+    fim_treino = int(n * 0.60)
+
+    fim_validacao = int(n * 0.80)
+
+    X_train = X[:fim_treino]
+    y_train = y[:fim_treino]
+
+    X_val = X[fim_treino:fim_validacao]
+    y_val = y[fim_treino:fim_validacao]
+
+    X_test = X[fim_validacao:]
+    y_test = y[fim_validacao:]
+
+    print("Treino:", len(X_train))
+
+    print("Validação:", len(X_val))
+
+    print("Teste:", len(X_test))
+
+    print("Entradas:", features)
+
+    print("Saída:", target)
+
+    # --------------------------------------------------------
+    # Normalização
+    # --------------------------------------------------------
+
+    scaler_X = RobustScaler()
+
+    scaler_y = RobustScaler()
+
+    X_train_scaled = scaler_X.fit_transform(X_train)
+
+    X_val_scaled = scaler_X.transform(X_val)
+
+    X_test_scaled = scaler_X.transform(X_test)
+
+    y_train_scaled = scaler_y.fit_transform(y_train)
+
+    y_val_scaled = scaler_y.transform(y_val)
+
+    y_test_scaled = scaler_y.transform(y_test)
+
+    # --------------------------------------------------------
+    # Sequências temporais
+    # --------------------------------------------------------
+
+    X_train_seq, y_train_seq = criar_sequencias(
+        X_train_scaled,
+        y_train_scaled,
+        JANELA
+    )
+
+    X_val_seq, y_val_seq = criar_sequencias(
+        X_val_scaled,
+        y_val_scaled,
+        JANELA
+    )
+
+    X_test_seq, y_test_seq = criar_sequencias(
+        X_test_scaled,
+        y_test_scaled,
+        JANELA
+    )
+
+    # --------------------------------------------------------
+    # Modelo
+    # --------------------------------------------------------
+
+    tf.keras.backend.clear_session()
+
+    tf.random.set_seed(SEED)
+
+    modelo = criar_modelo(
+        input_shape=(
+            X_train_seq.shape[1],
+            X_train_seq.shape[2]
+        )
+    )
+
+    early_stop = EarlyStopping(
+        monitor="val_loss",
+        patience=10,
+        restore_best_weights=True
+    )
+
+    modelo.fit(
+        X_train_seq,
+        y_train_seq,
+        validation_data=(X_val_seq, y_val_seq),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=[early_stop],
+        shuffle=False,
+        verbose=1
+    )
+
+    # --------------------------------------------------------
+    # Previsões
+    # --------------------------------------------------------
+
+    pred_train_scaled = modelo.predict(
+        X_train_seq,
+        verbose=0
+    )
+
+    pred_val_scaled = modelo.predict(
+        X_val_seq,
+        verbose=0
+    )
+
+    pred_test_scaled = modelo.predict(
+        X_test_seq,
+        verbose=0
+    )
+
+    pred_train = scaler_y.inverse_transform(
+        pred_train_scaled
+    ).ravel()
+
+    pred_val = scaler_y.inverse_transform(
+        pred_val_scaled
+    ).ravel()
+
+    pred_test = scaler_y.inverse_transform(
+        pred_test_scaled
+    ).ravel()
+
+    y_train_real = scaler_y.inverse_transform(
+        y_train_seq
+    ).ravel()
+
+    y_val_real = scaler_y.inverse_transform(
+        y_val_seq
+    ).ravel()
+
+    y_test_real = scaler_y.inverse_transform(
+        y_test_seq
+    ).ravel()
+
+    # --------------------------------------------------------
+    # Métricas
+    # --------------------------------------------------------
+
+    for fase, y_real, y_pred in [
+
+        ("treino", y_train_real, pred_train),
+
+        ("validacao", y_val_real, pred_val),
+
+        ("teste", y_test_real, pred_test)
+
+    ]:
+
+        rmse, mse, mae, r2, pearson = calcular_metricas(
+            y_real,
+            y_pred
+        )
+
+        resultados.append({
+
+            "modelo": "LSTM_simples",
+
+            "gas": gas,
+
+            "fase": fase,
+
+            "split": "60/20/20",
+
+            "janela": JANELA,
+
+            "n_features": X_train_seq.shape[2],
+
+            "n_amostras": len(y_real),
+
+            "RMSE": rmse,
+
+            "MSE": mse,
+
+            "MAE": mae,
+
+            "R2": r2,
+
+            "Pearson_r": pearson
+        })
+
+    # --------------------------------------------------------
+    # Dados para figura
+    # --------------------------------------------------------
+
+    tempo_teste = dados["time"].iloc[
+        fim_validacao + JANELA:
+    ].reset_index(drop=True)
+
+    df_prev_teste = pd.DataFrame({
+
+        "time": tempo_teste,
+
+        "valor_real": y_test_real,
+
+        "valor_calibrado": pred_test
+    })
+
+    previsoes_teste[gas] = df_prev_teste
+
+    # ========================================================
+    # FIGURA: REAL VS CALIBRADO
+    # ========================================================
+
+    plt.figure(figsize=(14, 5))
+
+    plt.plot(
+        df_prev_teste["time"],
+        df_prev_teste["valor_real"],
+        label="Valor real",
+        linewidth=2
+    )
+
+    plt.plot(
+        df_prev_teste["time"],
+        df_prev_teste["valor_calibrado"],
+        label="Valor calibrado pela LSTM",
+        linewidth=2
+    )
+
+    plt.title(
+        f"Comparação entre valores reais e calibrados - {gas}"
+    )
+
+    plt.xlabel("Tempo")
+
+    plt.ylabel(f"Concentração de {gas}")
+
+    plt.legend()
+
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # --------------------------------------------------------
+    # Salvar figura
+    # --------------------------------------------------------
+
+    nome_figura = (
+        f"{PASTA_FIGURAS}/"
+        f"comparacao_real_calibrado_{gas}.png"
+    )
+
+    plt.savefig(nome_figura, dpi=300)
+
+    # --------------------------------------------------------
+    # MOSTRAR FIGURA NOS RESULTADOS
+    # --------------------------------------------------------
+
+    plt.show()
+
+    plt.close()
+
+    print(f"Figura salva: {nome_figura}")
+
+
+# ============================================================
+# 8. Resultados finais
+# ============================================================
+
+df_resultados = pd.DataFrame(resultados)
+
+print("\nRESULTADOS FINAIS")
+
+print(df_resultados)
+
+df_resultados.to_csv(
+    "resultados_lstm_simples_60_20_20.csv",
+    index=False
+)
+
+
+# ============================================================
+# 9. Resumo apenas do teste
+# ============================================================
+
+df_teste = df_resultados[
+    df_resultados["fase"] == "teste"
+].copy()
+
+print("\nR2 DE TESTE POR GÁS")
+
+print(
+    df_teste[
+        ["gas", "RMSE", "MAE", "R2", "Pearson_r"]
+    ]
+)
+
+df_teste.to_csv(
+    "resumo_teste_lstm_simples_60_20_20.csv",
+    index=False
+)
+
+
+# ============================================================
+# 10. Salvar previsões
+# ============================================================
+
+for gas, df_prev in previsoes_teste.items():
+
+    nome = f"previsoes_lstm_simples_{gas}_teste.csv"
+
+    df_prev.to_csv(nome, index=False)
+
+
+# ============================================================
+# 11. Finalização
+# ============================================================
+
+print("\nArquivos salvos:")
+
+print("resultados_lstm_simples_60_20_20.csv")
+
+print("resumo_teste_lstm_simples_60_20_20.csv")
+
+print("previsoes_lstm_simples_<GAS>_teste.csv")
+
+print("\nFiguras salvas na pasta:")
+
+print(PASTA_FIGURAS)
