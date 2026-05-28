@@ -1,0 +1,325 @@
+# ============================================================
+# CALIBRAÇÃO COM RANDOM FOREST
+# Base: envcity_preprocessado_10min_prophet_sem_gaps.csv
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.stats import pearsonr
+
+# ============================================================
+# 1) CARREGAR BASE
+# ============================================================
+
+ARQUIVO = "envcity_preprocessado_10min_prophet_sem_gaps.csv"
+
+df = pd.read_csv(ARQUIVO)
+
+print("Dimensão da base:", df.shape)
+print("Colunas encontradas:")
+print(df.columns.tolist())
+
+# ============================================================
+# 2) AJUSTAR COLUNA DE TEMPO
+# ============================================================
+
+if "time" in df.columns:
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.sort_values("time").reset_index(drop=True)
+else:
+    print(Coluna 'time' não encontrada. Manter ordem atual)
+
+# ============================================================
+# 3) CONFIGURAÇÃO DOS GASES
+# ============================================================
+
+targets = {
+    "NO2": "iag_no2",
+    "CO": "iag_co",
+    "O3": "iag_o3",
+    "SO2": "iag_so2"
+}
+
+features_por_gas = {
+    "NO2": [
+        "e2sp_no2", "e2sp_no2_2", "e2sp_no2_3",
+        "e2sp_no2_we", "e2sp_no2_ae",
+        "e2sp_co_we",
+        "e2sp_temp"
+    ],
+
+    "CO": [
+        "e2sp_co_3",
+        "e2sp_co_we", "e2sp_co_ae",
+        "e2sp_temp"
+    ],
+
+    "O3": [
+        "e2sp_ox_we", "e2sp_ox_ae",
+        "e2sp_no2_we",
+        "e2sp_co_we",
+        "e2sp_temp"
+    ],
+
+    "SO2": [
+        "e2sp_so2_2",
+        "e2sp_so2_we", "e2sp_so2_ae",
+        "e2sp_co_we",
+        "e2sp_temp"
+    ]
+}
+
+# ============================================================
+# 4) CONFIGURAÇÕES DO RANDOM FOREST
+# ============================================================
+
+n_arvores_lista = [100, 200, 300, 500, 800, 1000, 1200]
+
+os.makedirs("resultados_rf", exist_ok=True)
+
+resultados = []
+predicoes = {}
+
+# ============================================================
+# 5) FUNÇÃO DE MÉTRICAS
+# ============================================================
+
+def calcular_metricas(y_real, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_real, y_pred))
+    mse = mean_squared_error(y_real, y_pred)
+    mae = mean_absolute_error(y_real, y_pred)
+    r2 = r2_score(y_real, y_pred)
+
+    if len(y_real) > 1:
+        pearson = pearsonr(y_real, y_pred)[0]
+    else:
+        pearson = np.nan
+
+    return rmse, mse, mae, r2, pearson
+
+# ============================================================
+# 6) TREINAMENTO POR GÁS
+# ============================================================
+
+for gas, target in targets.items():
+
+    print("\n" + "="*70)
+    print(f"Processando gás: {gas}")
+    print("="*70)
+
+    if target not in df.columns:
+        print(f"Target {target} não encontrado. Pulando {gas}.")
+        continue
+
+    features = [col for col in features_por_gas[gas] if col in df.columns]
+
+    if len(features) == 0:
+        print(f"Nenhuma entrada encontrada para {gas}. Pulando.")
+        continue
+
+    print("Target:", target)
+    print("Entradas usadas:")
+    print(features)
+
+    # ========================================================
+    # LIMPEZA DOS DADOS
+    # ========================================================
+
+    dados = df[features + [target]].copy()
+
+    # Converter tudo para numérico
+    dados = dados.apply(pd.to_numeric, errors="coerce")
+
+    # Remover infinitos
+    dados = dados.replace([np.inf, -np.inf], np.nan)
+
+    # Remover valores absurdamente grandes
+    limite = 1e10
+    dados = dados.mask(dados.abs() > limite, np.nan)
+
+    # Remover linhas com qualquer valor inválido
+    dados = dados.dropna()
+
+    if len(dados) < 10:
+        print(f"Poucos dados válidos para {gas}: {len(dados)} amostras. Pulando.")
+        continue
+
+    X = dados[features].astype(np.float64)
+    y = dados[target].astype(np.float64)
+
+    print("Amostras após limpeza:", len(dados))
+    print("Inf em X:", np.isinf(X.values).any())
+    print("NaN em X:", np.isnan(X.values).any())
+    print("Maior valor em X:", np.nanmax(X.values))
+    print("Menor valor em X:", np.nanmin(X.values))
+
+    # ========================================================
+    # SPLIT TEMPORAL 60/20/20
+    # ========================================================
+
+    n = len(dados)
+
+    fim_treino = int(n * 0.6)
+    fim_val = int(n * 0.8)
+
+    X_train = X.iloc[:fim_treino]
+    y_train = y.iloc[:fim_treino]
+
+    X_val = X.iloc[fim_treino:fim_val]
+    y_val = y.iloc[fim_treino:fim_val]
+
+    X_test = X.iloc[fim_val:]
+    y_test = y.iloc[fim_val:]
+
+    print(f"Treino: {len(X_train)} | Validação: {len(X_val)} | Teste: {len(X_test)}")
+
+    # Verificação final antes do treino
+    if (
+        np.isinf(X_train.values).any() or
+        np.isnan(X_train.values).any() or
+        np.isinf(y_train.values).any() or
+        np.isnan(y_train.values).any()
+    ):
+        print(f"Ainda há valores inválidos no treino de {gas}. Pulando.")
+        continue
+
+    melhor_r2_val = -999
+    melhor_modelo = None
+    melhor_n_arvores = None
+
+    # ========================================================
+    # TESTE COM VÁRIAS QUANTIDADES DE ÁRVORES
+    # ========================================================
+
+    for n_arvores in n_arvores_lista:
+
+        print(f"Treinando {gas} com {n_arvores} árvores...")
+
+        modelo = RandomForestRegressor(
+            n_estimators=n_arvores,
+            max_depth=20,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            random_state=42,
+            n_jobs=-1
+        )
+
+        modelo.fit(X_train, y_train)
+
+        for fase, X_fase, y_fase in [
+            ("treino", X_train, y_train),
+            ("validacao", X_val, y_val),
+            ("teste", X_test, y_test)
+        ]:
+
+            y_pred = modelo.predict(X_fase)
+            rmse, mse, mae, r2, pearson = calcular_metricas(y_fase, y_pred)
+
+            resultados.append({
+                "gas": gas,
+                "n_arvores": n_arvores,
+                "fase": fase,
+                "RMSE": rmse,
+                "MSE": mse,
+                "MAE": mae,
+                "R2": r2,
+                "Pearson": pearson,
+                "n_amostras": len(y_fase),
+                "features_usadas": ", ".join(features)
+            })
+
+        # Seleção do melhor modelo pelo R² da validação
+        y_val_pred = modelo.predict(X_val)
+        r2_val = r2_score(y_val, y_val_pred)
+
+        if r2_val > melhor_r2_val:
+            melhor_r2_val = r2_val
+            melhor_modelo = modelo
+            melhor_n_arvores = n_arvores
+
+    if melhor_modelo is None:
+        print(f"Nenhum modelo válido foi treinado para {gas}.")
+        continue
+
+    print(f"Melhor quantidade de árvores para {gas}: {melhor_n_arvores}")
+    print(f"Melhor R² na validação: {melhor_r2_val:.4f}")
+
+    # ========================================================
+    # PREDIÇÃO FINAL COM MELHOR MODELO
+    # ========================================================
+
+    y_test_pred = melhor_modelo.predict(X_test)
+
+    predicoes[gas] = pd.DataFrame({
+        "y_real": y_test.values,
+        "y_pred": y_test_pred
+    })
+
+    predicoes[gas].to_csv(
+        f"resultados_rf/predicoes_teste_{gas}.csv",
+        index=False
+    )
+
+    # ========================================================
+    # GRÁFICO REAL VS PREDITO
+    # ========================================================
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(y_test.values, label="Valor real")
+    plt.plot(y_test_pred, label="Valor calibrado - Random Forest")
+    plt.title(f"{gas} - Valores reais vs calibrados")
+    plt.xlabel("Amostras de teste")
+    plt.ylabel(f"Concentração de {gas}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"resultados_rf/rf_{gas}_real_vs_predito.png", dpi=300)
+    plt.show()
+
+    # ========================================================
+    # IMPORTÂNCIA DAS VARIÁVEIS
+    # ========================================================
+
+    importancia = pd.DataFrame({
+        "feature": features,
+        "importancia": melhor_modelo.feature_importances_
+    }).sort_values("importancia", ascending=False)
+
+    importancia.to_csv(
+        f"resultados_rf/importancia_features_{gas}.csv",
+        index=False
+    )
+
+    plt.figure(figsize=(8, 5))
+    plt.barh(importancia["feature"], importancia["importancia"])
+    plt.gca().invert_yaxis()
+    plt.title(f"{gas} - Importância das variáveis")
+    plt.xlabel("Importância")
+    plt.tight_layout()
+    plt.savefig(f"resultados_rf/importancia_features_{gas}.png", dpi=300)
+    plt.show()
+
+# ============================================================
+# 7) SALVAR RESULTADOS FINAIS
+# ============================================================
+
+df_resultados = pd.DataFrame(resultados)
+
+df_resultados.to_csv(
+    "resultados_rf/resultados_random_forest_varias_arvores.csv",
+    index=False
+)
+
+print("\nResultados salvos em:")
+print("resultados_rf/resultados_random_forest_varias_arvores.csv")
+
+print("\nResumo dos resultados no teste:")
+print(
+    df_resultados[df_resultados["fase"] == "teste"]
+    .sort_values(["gas", "R2"], ascending=[True, False])
+)
