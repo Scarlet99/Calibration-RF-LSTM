@@ -1,0 +1,398 @@
+# ============================================================
+# PRÉ-PROCESSAMENTO 5 MIN - ENVCITY
+# Prophet + remoção de outliers + preenchimento de gaps
+# ============================================================
+
+import pandas as pd
+import numpy as np
+from prophet import Prophet
+import warnings
+warnings.filterwarnings("ignore")
+
+# ============================================================
+# 1) CAMINHO DO ARQUIVO
+# ============================================================
+
+path = "envcity_organizado_5min_preservando_e2sp (1).csv"
+
+# ============================================================
+# 2) LEITURA DO CSV
+# ============================================================
+
+df = pd.read_csv(
+    path,
+    sep=",",
+    engine="python",
+    on_bad_lines="skip"
+)
+
+df.columns = df.columns.astype(str).str.strip().str.replace("\ufeff", "")
+
+print("Shape original:", df.shape)
+print("Colunas:", df.columns.tolist())
+
+# ============================================================
+# 3) AJUSTE DA COLUNA DE TEMPO
+# ============================================================
+
+df["time"] = pd.to_datetime(df["time"], errors="coerce")
+
+df = df.dropna(subset=["time"]).copy()
+df = df.sort_values("time")
+df = df.drop_duplicates(subset=["time"]).reset_index(drop=True)
+
+print("\nPeríodo original:")
+print(df["time"].min(), "->", df["time"].max())
+
+# ============================================================
+# 4) CONVERSÃO NUMÉRICA
+# ============================================================
+
+for col in df.columns:
+    if col != "time":
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.replace(",", ".", regex=False)
+            .str.strip()
+        )
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = df.replace([np.inf, -np.inf], np.nan)
+
+# ============================================================
+# 5) CORTAR PERÍODO VÁLIDO
+# ============================================================
+
+inicio_iag = "2023-03-16 00:00:00"
+fim_iag = "2023-06-23 11:59:59"
+
+df = df[
+    (df["time"] >= inicio_iag) &
+    (df["time"] <= fim_iag)
+].copy()
+
+# Remover falha conhecida do IAG
+inicio_falha_iag = "2023-06-01 13:00:00"
+fim_falha_iag = "2023-06-02 23:59:59"
+
+df = df[
+    ~(
+        (df["time"] >= inicio_falha_iag) &
+        (df["time"] <= fim_falha_iag)
+    )
+].copy()
+
+print("\nApós corte do período válido:")
+print(df.shape)
+print(df["time"].min(), "->", df["time"].max())
+
+# ============================================================
+# 6) REMOVER LINHAS TOTALMENTE VAZIAS
+# ============================================================
+
+cols_dados = [c for c in df.columns if c != "time"]
+df = df.dropna(subset=cols_dados, how="all").copy()
+
+# ============================================================
+# 7) ORGANIZAR EM SÉRIE TEMPORAL DE 5 MIN
+# ============================================================
+
+df = df.set_index("time")
+
+df_5min = df.resample("5min").mean()
+
+# Criar índice contínuo de 5 em 5 min
+indice_completo = pd.date_range(
+    start=df_5min.index.min(),
+    end=df_5min.index.max(),
+    freq="5min"
+)
+
+df_5min = df_5min.reindex(indice_completo)
+df_5min.index.name = "time"
+
+print("\nShape após organizar em 5 min:")
+print(df_5min.shape)
+print(df_5min.index.min(), "->", df_5min.index.max())
+
+# ============================================================
+# 8) REMOVER VALORES ABSURDOS
+# ============================================================
+
+for col in df_5min.columns:
+    df_5min.loc[df_5min[col].abs() > 1e6, col] = np.nan
+
+# ============================================================
+# 9) INTERPOLAR PEQUENOS GAPS ANTES DO PROPHET
+# ============================================================
+
+df_5min = df_5min.interpolate(
+    method="time",
+    limit=6,              # 6 pontos de 5 min = 30 min
+    limit_direction="both"
+)
+
+# ============================================================
+# 10) FUNÇÃO PARA REMOVER OUTLIERS COM PROPHET
+# ============================================================
+
+def remover_outliers_prophet(
+    df_in,
+    cols,
+    interval_width=0.99,
+    changepoint_prior_scale=0.05,
+    seasonality_mode="additive",
+    min_pontos=100
+):
+    df_out = df_in.copy()
+    resumo = []
+
+    for col in cols:
+        if col not in df_out.columns:
+            continue
+
+        serie_valid = df_out[col].dropna()
+
+        if len(serie_valid) < min_pontos:
+            print(f"[{col}] pulada - poucos dados válidos: {len(serie_valid)}")
+            resumo.append({
+                "coluna": col,
+                "pontos_validos": len(serie_valid),
+                "outliers_removidos": 0,
+                "status": "poucos dados"
+            })
+            continue
+
+        try:
+            base_prophet = serie_valid.reset_index()
+            base_prophet.columns = ["ds", "y"]
+
+            modelo = Prophet(
+                interval_width=interval_width,
+                changepoint_prior_scale=changepoint_prior_scale,
+                seasonality_mode=seasonality_mode,
+                daily_seasonality=True,
+                weekly_seasonality=True,
+                yearly_seasonality=False
+            )
+
+            modelo.fit(base_prophet)
+
+            previsao = modelo.predict(base_prophet[["ds"]])
+
+            mask_outlier = (
+                (base_prophet["y"].values < previsao["yhat_lower"].values) |
+                (base_prophet["y"].values > previsao["yhat_upper"].values)
+            )
+
+            n_outliers = int(mask_outlier.sum())
+            datas_outliers = base_prophet.loc[mask_outlier, "ds"]
+
+            df_out.loc[datas_outliers, col] = np.nan
+
+            print(f"[{col}] ok - {n_outliers} outliers removidos")
+
+            resumo.append({
+                "coluna": col,
+                "pontos_validos": len(serie_valid),
+                "outliers_removidos": n_outliers,
+                "status": "processada"
+            })
+
+        except Exception as e:
+            print(f"[{col}] erro: {e}")
+            resumo.append({
+                "coluna": col,
+                "pontos_validos": len(serie_valid),
+                "outliers_removidos": 0,
+                "status": f"erro: {e}"
+            })
+
+    return df_out, pd.DataFrame(resumo)
+
+# ============================================================
+# 11) COLUNAS PARA O PROPHET
+# ============================================================
+
+colunas_prophet = [
+    "iag_no2", "iag_co", "iag_o3", "iag_so2",
+
+    "e2sp_co", "e2sp_co_2", "e2sp_co_3", "e2sp_co_4",
+    "e2sp_no2", "e2sp_no2_2", "e2sp_no2_3", "e2sp_no2_4",
+    "e2sp_ox", "e2sp_ox_2", "e2sp_ox_3", "e2sp_ox_4",
+    "e2sp_so2", "e2sp_so2_2", "e2sp_so2_3", "e2sp_so2_4",
+
+    "e2sp_co_we", "e2sp_co_ae",
+    "e2sp_no2_we", "e2sp_no2_ae",
+    "e2sp_ox_we", "e2sp_ox_ae",
+    "e2sp_so2_we", "e2sp_so2_ae",
+
+    "pin_temp", "pin_umid",
+    "iag_ambienttemp", "iag_internaltemp", "iag_internalrh"
+]
+
+colunas_prophet = [c for c in colunas_prophet if c in df_5min.columns]
+
+print("\nColunas processadas com Prophet:")
+print(colunas_prophet)
+
+df_sem_outliers, resumo_outliers = remover_outliers_prophet(
+    df_in=df_5min,
+    cols=colunas_prophet,
+    interval_width=0.99,
+    changepoint_prior_scale=0.05,
+    seasonality_mode="additive",
+    min_pontos=100
+)
+
+# ============================================================
+# 12) TRATAMENTO DOS GAPS APÓS PROPHET
+# ============================================================
+
+df_final = df_sem_outliers.copy()
+
+df_final = df_final.interpolate(
+    method="time",
+    limit=12,             # até 1 hora
+    limit_direction="both"
+)
+
+df_final = df_final.ffill().bfill()
+
+# ============================================================
+# 13) SUAVIZAÇÃO LEVE
+# ============================================================
+
+for col in colunas_prophet:
+    if col in df_final.columns:
+        df_final[col] = df_final[col].rolling(
+            window=3,
+            center=True,
+            min_periods=1
+        ).mean()
+
+# ============================================================
+# 14) FINALIZAÇÃO
+# ============================================================
+
+df_final = df_final.reset_index()
+
+colunas_numericas = [c for c in df_final.columns if c != "time"]
+
+df_final[colunas_numericas] = df_final[colunas_numericas].replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+for col in colunas_numericas:
+    df_final.loc[df_final[col].abs() > 1e6, col] = np.nan
+
+df_final[colunas_numericas] = df_final[colunas_numericas].interpolate(
+    method="linear",
+    limit_direction="both"
+)
+
+df_final[colunas_numericas] = df_final[colunas_numericas].ffill().bfill()
+
+# ============================================================
+# 15) SALVAR BASE COMPLETA
+# ============================================================
+
+df_final.to_csv(
+    "envcity_preprocessado_5min_prophet_sem_gaps.csv",
+    index=False
+)
+
+resumo_outliers.to_csv(
+    "resumo_outliers_prophet_5min.csv",
+    index=False
+)
+
+# ============================================================
+# 16) BASES POR GÁS PARA CALIBRAÇÃO
+# ============================================================
+
+features_por_gas = {
+    "NO2": [
+        "e2sp_no2", "e2sp_no2_2", "e2sp_no2_3",
+        "e2sp_no2_we", "e2sp_no2_ae",
+        "e2sp_co_we", "pin_temp", "pin_umid"
+    ],
+
+    "CO": [
+        "e2sp_co", "e2sp_co_2", "e2sp_co_3",
+        "e2sp_co_we", "e2sp_co_ae",
+        "pin_temp", "pin_umid"
+    ],
+
+    "O3": [
+        "e2sp_ox", "e2sp_ox_2", "e2sp_ox_3",
+        "e2sp_ox_we", "e2sp_ox_ae",
+        "e2sp_no2_we", "e2sp_co_we",
+        "pin_temp", "pin_umid"
+    ],
+
+    "SO2": [
+        "e2sp_so2", "e2sp_so2_2", "e2sp_so2_3",
+        "e2sp_so2_we", "e2sp_so2_ae",
+        "e2sp_co_we", "pin_temp", "pin_umid"
+    ]
+}
+
+targets = {
+    "NO2": "iag_no2",
+    "CO": "iag_co",
+    "O3": "iag_o3",
+    "SO2": "iag_so2"
+}
+
+for gas, target in targets.items():
+
+    if target not in df_final.columns:
+        print(f"{gas}: target {target} não encontrado.")
+        continue
+
+    features = [f for f in features_por_gas[gas] if f in df_final.columns]
+
+    if len(features) == 0:
+        print(f"{gas}: nenhuma feature encontrada.")
+        continue
+
+    base_gas = df_final[["time"] + features + [target]].copy()
+
+    base_gas = base_gas.replace([np.inf, -np.inf], np.nan)
+
+    for col in features + [target]:
+        base_gas[col] = pd.to_numeric(base_gas[col], errors="coerce")
+        base_gas.loc[base_gas[col].abs() > 1e6, col] = np.nan
+
+    base_gas[features] = base_gas[features].interpolate(
+        method="linear",
+        limit_direction="both"
+    )
+
+    base_gas[features] = base_gas[features].ffill().bfill()
+
+    base_gas = base_gas.dropna(subset=features + [target])
+
+    nome_arquivo = f"base_calibracao_{gas}_5min_prophet_sem_gaps.csv"
+
+    base_gas.to_csv(nome_arquivo, index=False)
+
+    print("\n======================================")
+    print("Gás:", gas)
+    print("Arquivo:", nome_arquivo)
+    print("Shape:", base_gas.shape)
+    print("Período:", base_gas["time"].min(), "->", base_gas["time"].max())
+    print("Features usadas:", features)
+
+# ============================================================
+# 17) RESUMO FINAL
+# ============================================================
+
+print("\n================ RESUMO FINAL ================")
+print("Base completa:", df_final.shape)
+print("Período final:", df_final["time"].min(), "->", df_final["time"].max())
+print("Arquivo salvo: envcity_preprocessado_5min_prophet_sem_gaps.csv")
+print("Resumo Prophet: resumo_outliers_prophet_5min.csv")
