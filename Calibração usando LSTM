@@ -1,0 +1,349 @@
+# ============================================================
+# LSTM - CALIBRAÇÃO CO COM JANELA TEMPORAL 24
+# SPLIT ALEATÓRIO 60/20/20
+# BASE: envcity_preprocessado_5min_prophet_sem_gaps.csv
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.optimizers import Adam
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+arquivo = "envcity_preprocessado_5min_prophet_sem_gaps.csv"
+
+target = "iag_co"
+
+features = [
+    "e2sp_co",
+    "e2sp_co_we",
+    "e2sp_co_ae",
+    "pin_temp",
+    "pin_umid"
+]
+
+janela = 24  # 24 registros de 5 min = 2 horas
+
+# ============================================================
+# LEITURA DA BASE
+# ============================================================
+
+df = pd.read_csv(arquivo)
+
+df["time"] = pd.to_datetime(df["time"], errors="coerce")
+df = df.dropna(subset=["time"])
+df = df.sort_values("time").reset_index(drop=True)
+
+features = [f for f in features if f in df.columns]
+
+base = df[["time"] + features + [target]].copy()
+base = base.replace([np.inf, -np.inf], np.nan)
+base = base.dropna(subset=features + [target])
+base = base.sort_values("time").reset_index(drop=True)
+
+print("=" * 60)
+print("BASE")
+print("=" * 60)
+print("Shape:", base.shape)
+print("Período:", base["time"].min(), "até", base["time"].max())
+
+print("\nFeatures usadas:")
+print(features)
+
+print("\nTarget:")
+print(target)
+
+# ============================================================
+# NORMALIZAÇÃO
+# ============================================================
+
+scaler_X = MinMaxScaler()
+scaler_y = MinMaxScaler()
+
+X_scaled = scaler_X.fit_transform(base[features])
+y_scaled = scaler_y.fit_transform(base[[target]])
+
+# ============================================================
+# CRIAÇÃO DAS JANELAS TEMPORAIS
+# ============================================================
+
+def criar_janelas(X, y, tempos, janela):
+    X_seq = []
+    y_seq = []
+    tempos_seq = []
+
+    for i in range(janela, len(X)):
+        X_seq.append(X[i-janela:i])
+        y_seq.append(y[i])
+        tempos_seq.append(tempos.iloc[i])
+
+    return np.array(X_seq), np.array(y_seq), np.array(tempos_seq)
+
+X_lstm, y_lstm, tempos_lstm = criar_janelas(
+    X_scaled,
+    y_scaled,
+    base["time"],
+    janela
+)
+
+print("\nShape X LSTM:", X_lstm.shape)
+print("Shape y LSTM:", y_lstm.shape)
+
+# ============================================================
+# SPLIT ALEATÓRIO 60/20/20
+# ============================================================
+
+X_train, X_temp, y_train, y_temp, tempo_train, tempo_temp = train_test_split(
+    X_lstm,
+    y_lstm,
+    tempos_lstm,
+    train_size=0.60,
+    random_state=42,
+    shuffle=True
+)
+
+X_valid, X_test, y_valid, y_test, tempo_valid, tempo_test = train_test_split(
+    X_temp,
+    y_temp,
+    tempo_temp,
+    test_size=0.50,
+    random_state=42,
+    shuffle=True
+)
+
+print("\nTreino:", X_train.shape)
+print("Validação:", X_valid.shape)
+print("Teste:", X_test.shape)
+
+# ============================================================
+# MODELO LSTM
+# ============================================================
+
+modelo = Sequential()
+
+modelo.add(LSTM(
+    units=64,
+    input_shape=(X_train.shape[1], X_train.shape[2])
+))
+
+modelo.add(Dropout(0.3))
+modelo.add(Dense(32, activation="relu"))
+modelo.add(Dense(1))
+
+modelo.compile(
+    optimizer=Adam(learning_rate=0.0005),
+    loss="mse"
+)
+
+modelo.summary()
+
+# ============================================================
+# TREINAMENTO
+# ============================================================
+
+early_stop = EarlyStopping(
+    monitor="val_loss",
+    patience=20,
+    restore_best_weights=True
+)
+
+historico = modelo.fit(
+    X_train,
+    y_train,
+    validation_data=(X_valid, y_valid),
+    epochs=250,
+    batch_size=32,
+    callbacks=[early_stop],
+    verbose=1
+)
+
+# ============================================================
+# PREVISÕES
+# ============================================================
+
+pred_train = modelo.predict(X_train)
+pred_valid = modelo.predict(X_valid)
+pred_test = modelo.predict(X_test)
+
+y_train_real = scaler_y.inverse_transform(y_train)
+y_valid_real = scaler_y.inverse_transform(y_valid)
+y_test_real = scaler_y.inverse_transform(y_test)
+
+pred_train_real = scaler_y.inverse_transform(pred_train)
+pred_valid_real = scaler_y.inverse_transform(pred_valid)
+pred_test_real = scaler_y.inverse_transform(pred_test)
+
+# ============================================================
+# MÉTRICAS
+# ============================================================
+
+def metricas(y_real, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_real, y_pred))
+    mse = mean_squared_error(y_real, y_pred)
+    mae = mean_absolute_error(y_real, y_pred)
+    r2 = r2_score(y_real, y_pred)
+
+    if np.std(y_real) == 0 or np.std(y_pred) == 0:
+        pearson = np.nan
+    else:
+        pearson = np.corrcoef(y_real.flatten(), y_pred.flatten())[0, 1]
+
+    return rmse, mse, mae, r2, pearson
+
+resultado_final = []
+
+for fase, y_real, y_pred in [
+    ("treino", y_train_real, pred_train_real),
+    ("validacao", y_valid_real, pred_valid_real),
+    ("teste", y_test_real, pred_test_real)
+]:
+    rmse, mse, mae, r2, pearson = metricas(y_real, y_pred)
+    resultado_final.append([fase, rmse, mse, mae, r2, pearson])
+
+resultado_final = pd.DataFrame(
+    resultado_final,
+    columns=["fase", "RMSE", "MSE", "MAE", "R2", "Pearson"]
+)
+
+print("\n==============================")
+print("RESULTADOS")
+print("==============================")
+print(resultado_final)
+
+resultado_final.to_csv("resultados_lstm_co_janela24.csv", index=False)
+
+# ============================================================
+# GRÁFICO: CURVA DE TREINAMENTO
+# ============================================================
+
+plt.figure(figsize=(8, 5))
+plt.plot(historico.history["loss"], label="Treino")
+plt.plot(historico.history["val_loss"], label="Validação")
+plt.xlabel("Épocas")
+plt.ylabel("Erro MSE")
+plt.title("Curva de Treinamento - LSTM CO com Janela 24")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("lstm_co_janela24_curva_treinamento.png", dpi=300)
+plt.show()
+
+# ============================================================
+# GRÁFICO: REAL VS PREDITO - TESTE
+# ============================================================
+
+plt.figure(figsize=(8, 6))
+plt.scatter(y_test_real, pred_test_real, alpha=0.5)
+
+min_val = min(y_test_real.min(), pred_test_real.min())
+max_val = max(y_test_real.max(), pred_test_real.max())
+
+plt.plot([min_val, max_val], [min_val, max_val], linestyle="--")
+
+plt.xlabel("CO Real")
+plt.ylabel("CO Predito")
+plt.title("LSTM - CO Real vs Predito")
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("lstm_co_janela24_real_vs_predito.png", dpi=300)
+plt.show()
+
+# ============================================================
+# GRÁFICO: SÉRIE TEMPORAL REAL VS PREDITO - TESTE
+# ============================================================
+
+ordem = np.argsort(tempo_test)
+
+tempo_test_ord = tempo_test[ordem]
+y_test_ord = y_test_real.flatten()[ordem]
+pred_test_ord = pred_test_real.flatten()[ordem]
+
+plt.figure(figsize=(14, 6))
+
+plt.plot(
+    tempo_test_ord,
+    y_test_ord,
+    label="CO Real - Estação de referência",
+    linewidth=2
+)
+
+plt.plot(
+    tempo_test_ord,
+    pred_test_ord,
+    label="CO Predito - LSTM",
+    alpha=0.8
+)
+
+plt.xlabel("Tempo")
+plt.ylabel("Concentração de CO")
+plt.title("LSTM CO - Série Temporal no Conjunto de Teste")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("lstm_co_janela24_serie_teste.png", dpi=300)
+plt.show()
+
+# ============================================================
+# GRÁFICO: REFERÊNCIA VS SENSOR DE BAIXO CUSTO
+# ============================================================
+
+sensor_baixo_custo = "e2sp_co"
+
+comparacao = base[["time", target, sensor_baixo_custo]].copy()
+comparacao = comparacao.sort_values("time")
+
+plt.figure(figsize=(14, 6))
+
+plt.plot(
+    comparacao["time"],
+    comparacao[target],
+    label="Estação de referência - CO",
+    linewidth=2
+)
+
+plt.plot(
+    comparacao["time"],
+    comparacao[sensor_baixo_custo],
+    label="Sensor de baixo custo - CO",
+    alpha=0.8
+)
+
+plt.xlabel("Tempo")
+plt.ylabel("Concentração de CO")
+plt.title("Comparação da Concentração de CO: Referência vs Sensor de Baixo Custo")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("comparacao_co_referencia_vs_baixo_custo.png", dpi=300)
+plt.show()
+
+# ============================================================
+# SALVAR PREVISÕES DO TESTE
+# ============================================================
+
+previsoes_teste = pd.DataFrame({
+    "time": tempo_test_ord,
+    "CO_real": y_test_ord,
+    "CO_predito": pred_test_ord
+})
+
+previsoes_teste.to_csv("previsoes_lstm_co_janela24.csv", index=False)
+
+print("\nArquivos gerados:")
+print("resultados_lstm_co_janela24.csv")
+print("previsoes_lstm_co_janela24.csv")
+print("lstm_co_janela24_curva_treinamento.png")
+print("lstm_co_janela24_real_vs_predito.png")
+print("lstm_co_janela24_serie_teste.png")
+print("comparacao_co_referencia_vs_baixo_custo.png")
