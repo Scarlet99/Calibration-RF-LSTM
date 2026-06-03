@@ -1,0 +1,41 @@
+# Dicionário de Dados
+
+| Variável | Descrição |
+|-----------|-----------|
+| time | Data e hora da medição. |
+| e2sp_co | Estimativa da concentração de monóxido de carbono calculada pela Equação 1 da Alphasense. |
+| e2sp_co_2 | Estimativa da concentração de monóxido de carbono calculada pela Equação 2 da Alphasense. |
+| e2sp_co_3 | Estimativa da concentração de monóxido de carbono calculada pela Equação 3 da Alphasense. |
+| e2sp_co_4 | Estimativa da concentração de monóxido de carbono calculada pela Equação 4 da Alphasense. |
+| e2sp_co_ae | Sinal do eletrodo auxiliar (Auxiliary Electrode) do sensor de monóxido de carbono. |
+| e2sp_co_we | Sinal do eletrodo de trabalho (Working Electrode) do sensor de monóxido de carbono. |
+| e2sp_no2 | Estimativa da concentração de dióxido de nitrogênio calculada pela Equação 1 da Alphasense. |
+| e2sp_no2_2 | Estimativa da concentração de dióxido de nitrogênio calculada pela Equação 2 da Alphasense. |
+| e2sp_no2_3 | Estimativa da concentração de dióxido de nitrogênio calculada pela Equação 3 da Alphasense. |
+| e2sp_no2_4 | Estimativa da concentração de dióxido de nitrogênio calculada pela Equação 4 da Alphasense. |
+| e2sp_no2_ae | Sinal do eletrodo auxiliar (Auxiliary Electrode) do sensor de dióxido de nitrogênio. |
+| e2sp_no2_we | Sinal do eletrodo de trabalho (Working Electrode) do sensor de dióxido de nitrogênio. |
+| e2sp_ox | Estimativa da concentração de ozônio calculada pela Equação 1 da Alphasense. |
+| e2sp_ox_2 | Estimativa da concentração de ozônio calculada pela Equação 2 da Alphasense. |
+| e2sp_ox_3 | Estimativa da concentração de ozônio calculada pela Equação 3 da Alphasense. |
+| e2sp_ox_4 | Estimativa da concentração de ozônio calculada pela Equação 4 da Alphasense. |
+| e2sp_ox_ae | Sinal do eletrodo auxiliar (Auxiliary Electrode) do sensor oxidante OX-B431. |
+| e2sp_ox_we | Sinal do eletrodo de trabalho (Working Electrode) do sensor oxidante OX-B431. |
+| e2sp_so2 | Estimativa da concentração de dióxido de enxofre calculada pela Equação 1 da Alphasense. |
+| e2sp_so2_2 | Estimativa da concentração de dióxido de enxofre calculada pela Equação 2 da Alphasense. |
+| e2sp_so2_3 | Estimativa da concentração de dióxido de enxofre calculada pela Equação 3 da Alphasense. |
+| e2sp_so2_4 | Estimativa da concentração de dióxido de enxofre calculada pela Equação 4 da Alphasense. |
+| e2sp_so2_ae | Sinal do eletrodo auxiliar (Auxiliary Electrode) do sensor de dióxido de enxofre. |
+| e2sp_so2_we | Sinal do eletrodo de trabalho (Working Electrode) do sensor de dióxido de enxofre. |
+| e2sp_temp | Temperatura medida pelo módulo Envcity. |
+| iag_ambienttemp | Temperatura ambiente registrada pela estação de referência IAG. |
+| iag_co | Concentração de monóxido de carbono registrada pela estação de referência IAG. |
+| iag_internaltemp | Temperatura interna do equipamento da estação de referência IAG. |
+| iag_no | Concentração de monóxido de nitrogênio registrada pela estação de referência IAG. |
+| iag_no2 | Concentração de dióxido de nitrogênio registrada pela estação de referência IAG. |
+| iag_nox | Concentração de óxidos de nitrogênio (NOx) registrada pela estação de referência IAG. |
+| iag_o3 | Concentração de ozônio registrada pela estação de referência IAG. |
+| iag_so2 | Concentração de dióxido de enxofre registrada pela estação de referência IAG. |
+| pin_umid | Umidade relativa do ar registrada na estação meteorológica de Pinheiros. |
+| pin_temp | Temperatura do ar registrada na estação meteorológica de Pinheiros. |
+| pin_umid.1 | Coluna duplicada da variável de umidade relativa do ar da estação meteorológica de Pinheiros. |
