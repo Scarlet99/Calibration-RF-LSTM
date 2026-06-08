@@ -1,398 +1,474 @@
 # ============================================================
-# PRÉ-PROCESSAMENTO 5 MIN - ENVCITY
-# Prophet + remoção de outliers + preenchimento de gaps
+# PRÉ-PROCESSAMENTO COMPLETO - BASE ENVCITY
 # ============================================================
 
 import pandas as pd
 import numpy as np
-from prophet import Prophet
-import warnings
-warnings.filterwarnings("ignore")
 
 # ============================================================
-# 1) CAMINHO DO ARQUIVO
+# 1. ARQUIVOS
 # ============================================================
 
-path = "envcity_organizado_5min_preservando_e2sp (1).csv"
+arquivo_base = "envcity_df_sp_dataset_2023.csv"
+arquivo_temp = "CETESB_temp_medias_horarias.csv"
+
+arquivo_saida = "base_5min_preprocessada_final.csv"
+arquivo_treino = "base_5min_treino.csv"
+arquivo_validacao = "base_5min_validacao.csv"
+arquivo_teste = "base_5min_teste.csv"
+
+freq = "5min"
 
 # ============================================================
-# 2) LEITURA DO CSV
+# 2. FUNÇÃO PARA CORRIGIR NÚMEROS
+# ============================================================
+
+def corrigir_numero(x):
+    if pd.isna(x):
+        return np.nan
+
+    s = str(x).strip()
+
+    if s == "" or s.lower() in ["nan", "none", "null"]:
+        return np.nan
+
+    s = s.replace(",", ".")
+
+    # Corrige casos como 10.791.773.073.601 -> 10.791773073601
+    if s.count(".") > 1:
+        negativo = s.startswith("-")
+        if negativo:
+            s = s[1:]
+
+        primeira = s.find(".")
+        s = s[:primeira + 1] + s[primeira + 1:].replace(".", "")
+
+        if negativo:
+            s = "-" + s
+
+    try:
+        return float(s)
+    except:
+        return np.nan
+
+# ============================================================
+# 3. LER BASE PRINCIPAL
 # ============================================================
 
 df = pd.read_csv(
-    path,
-    sep=",",
-    engine="python",
-    on_bad_lines="skip"
+    arquivo_base,
+    sep=";",
+    low_memory=False
 )
 
-df.columns = df.columns.astype(str).str.strip().str.replace("\ufeff", "")
-
-print("Shape original:", df.shape)
-print("Colunas:", df.columns.tolist())
+print("=" * 70)
+print("BASE ORIGINAL")
+print("=" * 70)
+print("Shape:", df.shape)
+print("Colunas:")
+print(df.columns.tolist())
 
 # ============================================================
-# 3) AJUSTE DA COLUNA DE TEMPO
+# 4. TRATAR COLUNA DE TEMPO
 # ============================================================
 
-df["time"] = pd.to_datetime(df["time"], errors="coerce")
+df["time"] = pd.to_datetime(
+    df["time"],
+    dayfirst=True,
+    errors="coerce"
+)
 
-df = df.dropna(subset=["time"]).copy()
+df = df.dropna(subset=["time"])
 df = df.sort_values("time")
-df = df.drop_duplicates(subset=["time"]).reset_index(drop=True)
-
-print("\nPeríodo original:")
-print(df["time"].min(), "->", df["time"].max())
+df = df.drop_duplicates(subset=["time"])
 
 # ============================================================
-# 4) CONVERSÃO NUMÉRICA
+# 5. CORRIGIR COLUNAS NUMÉRICAS
 # ============================================================
 
 for col in df.columns:
     if col != "time":
-        df[col] = (
-            df[col]
-            .astype(str)
-            .str.replace(",", ".", regex=False)
-            .str.strip()
-        )
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = df[col].apply(corrigir_numero)
 
-df = df.replace([np.inf, -np.inf], np.nan)
+print("\nPeríodo da base principal:")
+print(df["time"].min(), "até", df["time"].max())
 
 # ============================================================
-# 5) CORTAR PERÍODO VÁLIDO
+# 6. REMOVER COLUNAS TOTALMENTE VAZIAS
 # ============================================================
 
-inicio_iag = "2023-03-16 00:00:00"
-fim_iag = "2023-06-23 11:59:59"
+colunas_vazias = df.columns[df.isna().mean() == 1].tolist()
 
-df = df[
-    (df["time"] >= inicio_iag) &
-    (df["time"] <= fim_iag)
-].copy()
+print("\nColunas totalmente vazias removidas:")
+print(colunas_vazias)
 
-# Remover falha conhecida do IAG
-inicio_falha_iag = "2023-06-01 13:00:00"
-fim_falha_iag = "2023-06-02 23:59:59"
-
-df = df[
-    ~(
-        (df["time"] >= inicio_falha_iag) &
-        (df["time"] <= fim_falha_iag)
-    )
-].copy()
-
-print("\nApós corte do período válido:")
-print(df.shape)
-print(df["time"].min(), "->", df["time"].max())
+df = df.drop(columns=colunas_vazias)
 
 # ============================================================
-# 6) REMOVER LINHAS TOTALMENTE VAZIAS
-# ============================================================
-
-cols_dados = [c for c in df.columns if c != "time"]
-df = df.dropna(subset=cols_dados, how="all").copy()
-
-# ============================================================
-# 7) ORGANIZAR EM SÉRIE TEMPORAL DE 5 MIN
+# 7. REAMOSTRAR BASE PRINCIPAL PARA 5 MINUTOS
 # ============================================================
 
 df = df.set_index("time")
 
-df_5min = df.resample("5min").mean()
+df_5min = df.resample(freq).mean(numeric_only=True)
 
-# Criar índice contínuo de 5 em 5 min
-indice_completo = pd.date_range(
-    start=df_5min.index.min(),
-    end=df_5min.index.max(),
-    freq="5min"
-)
-
-df_5min = df_5min.reindex(indice_completo)
-df_5min.index.name = "time"
-
-print("\nShape após organizar em 5 min:")
+print("\nBase principal reamostrada:")
 print(df_5min.shape)
-print(df_5min.index.min(), "->", df_5min.index.max())
 
 # ============================================================
-# 8) REMOVER VALORES ABSURDOS
+# 8. LER TEMPERATURA CETESB
 # ============================================================
 
-for col in df_5min.columns:
-    df_5min.loc[df_5min[col].abs() > 1e6, col] = np.nan
-
-# ============================================================
-# 9) INTERPOLAR PEQUENOS GAPS ANTES DO PROPHET
-# ============================================================
-
-df_5min = df_5min.interpolate(
-    method="time",
-    limit=6,              # 6 pontos de 5 min = 30 min
-    limit_direction="both"
+temp = pd.read_csv(
+    arquivo_temp,
+    sep=";",
+    low_memory=False
 )
 
-# ============================================================
-# 10) FUNÇÃO PARA REMOVER OUTLIERS COM PROPHET
-# ============================================================
+print("\nBASE DE TEMPERATURA")
+print("=" * 70)
+print("Shape:", temp.shape)
+print("Colunas:", temp.columns.tolist())
 
-def remover_outliers_prophet(
-    df_in,
-    cols,
-    interval_width=0.99,
-    changepoint_prior_scale=0.05,
-    seasonality_mode="additive",
-    min_pontos=100
-):
-    df_out = df_in.copy()
-    resumo = []
+temp["time"] = pd.to_datetime(
+    temp["time"],
+    dayfirst=True,
+    errors="coerce"
+)
 
-    for col in cols:
-        if col not in df_out.columns:
-            continue
-
-        serie_valid = df_out[col].dropna()
-
-        if len(serie_valid) < min_pontos:
-            print(f"[{col}] pulada - poucos dados válidos: {len(serie_valid)}")
-            resumo.append({
-                "coluna": col,
-                "pontos_validos": len(serie_valid),
-                "outliers_removidos": 0,
-                "status": "poucos dados"
-            })
-            continue
-
-        try:
-            base_prophet = serie_valid.reset_index()
-            base_prophet.columns = ["ds", "y"]
-
-            modelo = Prophet(
-                interval_width=interval_width,
-                changepoint_prior_scale=changepoint_prior_scale,
-                seasonality_mode=seasonality_mode,
-                daily_seasonality=True,
-                weekly_seasonality=True,
-                yearly_seasonality=False
-            )
-
-            modelo.fit(base_prophet)
-
-            previsao = modelo.predict(base_prophet[["ds"]])
-
-            mask_outlier = (
-                (base_prophet["y"].values < previsao["yhat_lower"].values) |
-                (base_prophet["y"].values > previsao["yhat_upper"].values)
-            )
-
-            n_outliers = int(mask_outlier.sum())
-            datas_outliers = base_prophet.loc[mask_outlier, "ds"]
-
-            df_out.loc[datas_outliers, col] = np.nan
-
-            print(f"[{col}] ok - {n_outliers} outliers removidos")
-
-            resumo.append({
-                "coluna": col,
-                "pontos_validos": len(serie_valid),
-                "outliers_removidos": n_outliers,
-                "status": "processada"
-            })
-
-        except Exception as e:
-            print(f"[{col}] erro: {e}")
-            resumo.append({
-                "coluna": col,
-                "pontos_validos": len(serie_valid),
-                "outliers_removidos": 0,
-                "status": f"erro: {e}"
-            })
-
-    return df_out, pd.DataFrame(resumo)
-
-# ============================================================
-# 11) COLUNAS PARA O PROPHET
-# ============================================================
-
-colunas_prophet = [
-    "iag_no2", "iag_co", "iag_o3", "iag_so2",
-
-    "e2sp_co", "e2sp_co_2", "e2sp_co_3", "e2sp_co_4",
-    "e2sp_no2", "e2sp_no2_2", "e2sp_no2_3", "e2sp_no2_4",
-    "e2sp_ox", "e2sp_ox_2", "e2sp_ox_3", "e2sp_ox_4",
-    "e2sp_so2", "e2sp_so2_2", "e2sp_so2_3", "e2sp_so2_4",
-
-    "e2sp_co_we", "e2sp_co_ae",
-    "e2sp_no2_we", "e2sp_no2_ae",
-    "e2sp_ox_we", "e2sp_ox_ae",
-    "e2sp_so2_we", "e2sp_so2_ae",
-
-    "pin_temp", "pin_umid",
-    "iag_ambienttemp", "iag_internaltemp", "iag_internalrh"
+# Ajuste automático do nome da coluna de temperatura
+possiveis_temp = [
+    "ctesb_temp",
+    "ctesb_temp_media_horaria",
+    "temp",
+    "temperatura",
+    "pin_temp"
 ]
 
-colunas_prophet = [c for c in colunas_prophet if c in df_5min.columns]
+col_temp = None
 
-print("\nColunas processadas com Prophet:")
-print(colunas_prophet)
+for c in possiveis_temp:
+    if c in temp.columns:
+        col_temp = c
+        break
 
-df_sem_outliers, resumo_outliers = remover_outliers_prophet(
-    df_in=df_5min,
-    cols=colunas_prophet,
-    interval_width=0.99,
-    changepoint_prior_scale=0.05,
-    seasonality_mode="additive",
-    min_pontos=100
-)
+if col_temp is None:
+    raise ValueError("Não encontrei a coluna de temperatura no arquivo CETESB.")
+
+temp[col_temp] = temp[col_temp].apply(corrigir_numero)
+
+temp = temp.dropna(subset=["time"])
+temp = temp.sort_values("time")
+temp = temp.drop_duplicates(subset=["time"])
+
+temp = temp[["time", col_temp]]
+temp = temp.rename(columns={col_temp: "pin_temp"})
+
+print("\nPeríodo da temperatura:")
+print(temp["time"].min(), "até", temp["time"].max())
 
 # ============================================================
-# 12) TRATAMENTO DOS GAPS APÓS PROPHET
+# 9. REAMOSTRAR TEMPERATURA PARA 5 MINUTOS
 # ============================================================
 
-df_final = df_sem_outliers.copy()
+temp = temp.set_index("time")
 
-df_final = df_final.interpolate(
+temp_5min = temp.resample(freq).mean()
+temp_5min["pin_temp"] = temp_5min["pin_temp"].interpolate(
     method="time",
-    limit=12,             # até 1 hora
     limit_direction="both"
 )
 
-df_final = df_final.ffill().bfill()
+print("\nTemperatura reamostrada:")
+print(temp_5min.shape)
 
 # ============================================================
-# 13) SUAVIZAÇÃO LEVE
+# 10. JUNTAR TEMPERATURA NA BASE PRINCIPAL
 # ============================================================
 
-for col in colunas_prophet:
-    if col in df_final.columns:
-        df_final[col] = df_final[col].rolling(
-            window=3,
-            center=True,
-            min_periods=1
-        ).mean()
+df_5min = df_5min.reset_index()
+temp_5min = temp_5min.reset_index()
 
-# ============================================================
-# 14) FINALIZAÇÃO
-# ============================================================
-
-df_final = df_final.reset_index()
-
-colunas_numericas = [c for c in df_final.columns if c != "time"]
-
-df_final[colunas_numericas] = df_final[colunas_numericas].replace(
-    [np.inf, -np.inf],
-    np.nan
+df_5min = pd.merge(
+    df_5min,
+    temp_5min,
+    on="time",
+    how="left"
 )
+
+# Se já existir pin_temp antiga, prioriza a nova
+if "pin_temp_x" in df_5min.columns and "pin_temp_y" in df_5min.columns:
+    df_5min["pin_temp"] = df_5min["pin_temp_y"]
+    df_5min = df_5min.drop(columns=["pin_temp_x", "pin_temp_y"])
+
+print("\nBase após adicionar temperatura:")
+print(df_5min.shape)
+
+# ============================================================
+# 11. REMOVER OUTLIERS DE FORMA CONSERVADORA
+# ============================================================
+# Não remove linhas.
+# Apenas transforma outlier em NaN para depois preencher gaps pequenos.
+
+def remover_outliers_iqr(s, fator=3.0):
+    q1 = s.quantile(0.25)
+    q3 = s.quantile(0.75)
+    iqr = q3 - q1
+
+    if pd.isna(iqr) or iqr == 0:
+        return s
+
+    limite_inf = q1 - fator * iqr
+    limite_sup = q3 + fator * iqr
+
+    return s.mask((s < limite_inf) | (s > limite_sup), np.nan)
+
+df_limpa = df_5min.copy()
+
+colunas_numericas = df_limpa.select_dtypes(include=[np.number]).columns.tolist()
+
+print("\nRemovendo outliers de forma conservadora...")
 
 for col in colunas_numericas:
-    df_final.loc[df_final[col].abs() > 1e6, col] = np.nan
+    antes = df_limpa[col].isna().sum()
+    df_limpa[col] = remover_outliers_iqr(df_limpa[col], fator=3.0)
+    depois = df_limpa[col].isna().sum()
 
-df_final[colunas_numericas] = df_final[colunas_numericas].interpolate(
-    method="linear",
+    novos_outliers = depois - antes
+    if novos_outliers > 0:
+        print(f"{col}: {novos_outliers} outliers tratados")
+
+# ============================================================
+# 12. INTERPOLAR GAPS PEQUENOS
+# ============================================================
+# Como está em 5 min:
+# limit=6 permite preencher gaps de até 30 minutos.
+# Gaps maiores continuam NaN.
+
+df_limpa = df_limpa.set_index("time")
+
+df_limpa = df_limpa.interpolate(
+    method="time",
+    limit=6,
     limit_direction="both"
 )
 
-df_final[colunas_numericas] = df_final[colunas_numericas].ffill().bfill()
+df_limpa = df_limpa.reset_index()
 
 # ============================================================
-# 15) SALVAR BASE COMPLETA
+# 13. REMOVER LINHAS TOTALMENTE VAZIAS
 # ============================================================
 
-df_final.to_csv(
-    "envcity_preprocessado_5min_prophet_sem_gaps.csv",
-    index=False
-)
-
-resumo_outliers.to_csv(
-    "resumo_outliers_prophet_5min.csv",
-    index=False
-)
+df_limpa = df_limpa.dropna(how="all")
 
 # ============================================================
-# 16) BASES POR GÁS PARA CALIBRAÇÃO
+# 14. RELATÓRIO DA BASE FINAL
 # ============================================================
 
-features_por_gas = {
-    "NO2": [
-        "e2sp_no2", "e2sp_no2_2", "e2sp_no2_3",
-        "e2sp_no2_we", "e2sp_no2_ae",
-        "e2sp_co_we", "pin_temp", "pin_umid"
-    ],
+print("\n" + "=" * 70)
+print("BASE FINAL")
+print("=" * 70)
 
-    "CO": [
-        "e2sp_co", "e2sp_co_2", "e2sp_co_3",
-        "e2sp_co_we", "e2sp_co_ae",
-        "pin_temp", "pin_umid"
-    ],
+print("Shape final:", df_limpa.shape)
 
-    "O3": [
-        "e2sp_ox", "e2sp_ox_2", "e2sp_ox_3",
-        "e2sp_ox_we", "e2sp_ox_ae",
-        "e2sp_no2_we", "e2sp_co_we",
-        "pin_temp", "pin_umid"
-    ],
+print("\nPeríodo final:")
+print(df_limpa["time"].min(), "até", df_limpa["time"].max())
 
-    "SO2": [
-        "e2sp_so2", "e2sp_so2_2", "e2sp_so2_3",
-        "e2sp_so2_we", "e2sp_so2_ae",
-        "e2sp_co_we", "pin_temp", "pin_umid"
-    ]
+print("\nPercentual de dados ausentes por coluna:")
+print((df_limpa.isna().mean() * 100).sort_values(ascending=False))
+
+# ============================================================
+# 15. VERIFICAR LINHAS COMPLETAS POR GÁS
+# ============================================================
+
+gases = {
+    "CO": {
+        "features": [
+            "e2sp_co",
+            "e2sp_co_we",
+            "e2sp_co_ae",
+            "pin_temp",
+            "pin_umid"
+        ],
+        "target": "iag_co"
+    },
+
+    "NO2": {
+        "features": [
+            "e2sp_no2",
+            "e2sp_no2_we",
+            "e2sp_no2_ae",
+            "e2sp_ox_we",
+            "pin_temp",
+            "pin_umid"
+        ],
+        "target": "iag_no2"
+    },
+
+    "O3": {
+        "features": [
+            "e2sp_ox",
+            "e2sp_ox_we",
+            "e2sp_ox_ae",
+            "pin_temp",
+            "pin_umid"
+        ],
+        "target": "iag_o3"
+    },
+
+    "SO2": {
+        "features": [
+            "e2sp_so2",
+            "e2sp_so2_we",
+            "e2sp_so2_ae",
+            "pin_temp",
+            "pin_umid"
+        ],
+        "target": "iag_so2"
+    }
 }
 
-targets = {
-    "NO2": "iag_no2",
-    "CO": "iag_co",
-    "O3": "iag_o3",
-    "SO2": "iag_so2"
+print("\nLinhas completas disponíveis por gás:")
+
+for gas, cfg in gases.items():
+    cols = cfg["features"] + [cfg["target"]]
+    cols = [c for c in cols if c in df_limpa.columns]
+
+    n_linhas = df_limpa[cols].dropna().shape[0]
+    print(f"{gas}: {n_linhas} linhas completas")
+
+# ============================================================
+# 16. SALVAR BASE FINAL
+# ============================================================
+
+df_limpa.to_csv(arquivo_saida, index=False)
+
+print("\nBase final salva em:")
+print(arquivo_saida)
+
+
+
+import pandas as pd
+import numpy as np
+
+arquivo = "base_5min_preprocessada_final.csv"
+
+df = pd.read_csv(arquivo)
+df["time"] = pd.to_datetime(df["time"], errors="coerce")
+df = df.dropna(subset=["time"])
+df = df.sort_values("time").reset_index(drop=True)
+
+print("="*60)
+print("1. INFORMAÇÕES GERAIS")
+print("="*60)
+print("Shape:", df.shape)
+print("Período:", df["time"].min(), "até", df["time"].max())
+print("Duplicados em time:", df["time"].duplicated().sum())
+
+print("\nFrequência mais comum:")
+print(df["time"].diff().value_counts().head())
+
+print("\nDados ausentes (%):")
+print((df.isna().mean() * 100).sort_values(ascending=False))
+
+gases = {
+    "CO": {
+        "features": ["e2sp_co", "e2sp_co_we", "e2sp_co_ae", "pin_temp", "pin_umid"],
+        "target": "iag_co"
+    },
+    "NO2": {
+        "features": ["e2sp_no2", "e2sp_no2_we", "e2sp_no2_ae", "e2sp_ox_we", "pin_temp", "pin_umid"],
+        "target": "iag_no2"
+    },
+    "O3": {
+        "features": ["e2sp_ox", "e2sp_ox_we", "e2sp_ox_ae", "pin_temp", "pin_umid"],
+        "target": "iag_o3"
+    },
+    "SO2": {
+        "features": ["e2sp_so2", "e2sp_so2_we", "e2sp_so2_ae", "pin_temp", "pin_umid"],
+        "target": "iag_so2"
+    }
 }
 
-for gas, target in targets.items():
+print("\n" + "="*60)
+print("2. LINHAS COMPLETAS POR GÁS")
+print("="*60)
 
-    if target not in df_final.columns:
-        print(f"{gas}: target {target} não encontrado.")
-        continue
+for gas, cfg in gases.items():
+    cols = cfg["features"] + [cfg["target"]]
+    cols = [c for c in cols if c in df.columns]
 
-    features = [f for f in features_por_gas[gas] if f in df_final.columns]
+    dados_gas = df[["time"] + cols].dropna()
 
-    if len(features) == 0:
-        print(f"{gas}: nenhuma feature encontrada.")
-        continue
+    print(f"\n{gas}")
+    print("Colunas usadas:", cols)
+    print("Linhas completas:", len(dados_gas))
 
-    base_gas = df_final[["time"] + features + [target]].copy()
+    if len(dados_gas) < 500:
+        print("AVISO: poucos dados para calibração.")
+    elif len(dados_gas) < 1000:
+        print("ATENÇÃO: quantidade aceitável, mas limitada.")
+    else:
+        print("OK: quantidade boa para teste inicial.")
 
-    base_gas = base_gas.replace([np.inf, -np.inf], np.nan)
+print("\n" + "="*60)
+print("3. DIVISÃO TEMPORAL SIMULADA 60/20/20")
+print("="*60)
 
-    for col in features + [target]:
-        base_gas[col] = pd.to_numeric(base_gas[col], errors="coerce")
-        base_gas.loc[base_gas[col].abs() > 1e6, col] = np.nan
+n = len(df)
+fim_treino = int(n * 0.60)
+fim_validacao = int(n * 0.80)
 
-    base_gas[features] = base_gas[features].interpolate(
-        method="linear",
-        limit_direction="both"
-    )
+partes = {
+    "Treino": df.iloc[:fim_treino],
+    "Validação": df.iloc[fim_treino:fim_validacao],
+    "Teste": df.iloc[fim_validacao:]
+}
 
-    base_gas[features] = base_gas[features].ffill().bfill()
+for nome, parte in partes.items():
+    print(f"\n{nome}")
+    print("Shape:", parte.shape)
+    print("Período:", parte["time"].min(), "até", parte["time"].max())
 
-    base_gas = base_gas.dropna(subset=features + [target])
+    for gas, cfg in gases.items():
+        cols = cfg["features"] + [cfg["target"]]
+        cols = [c for c in cols if c in parte.columns]
+        n_gas = parte[cols].dropna().shape[0]
+        print(f"{gas}: {n_gas} linhas completas")
 
-    nome_arquivo = f"base_calibracao_{gas}_5min_prophet_sem_gaps.csv"
+print("\n" + "="*60)
+print("4. CORRELAÇÃO SENSOR X REFERÊNCIA")
+print("="*60)
 
-    base_gas.to_csv(nome_arquivo, index=False)
+pares = {
+    "CO": ("e2sp_co", "iag_co"),
+    "NO2": ("e2sp_no2", "iag_no2"),
+    "O3": ("e2sp_ox", "iag_o3"),
+    "SO2": ("e2sp_so2", "iag_so2")
+}
 
-    print("\n======================================")
-    print("Gás:", gas)
-    print("Arquivo:", nome_arquivo)
-    print("Shape:", base_gas.shape)
-    print("Período:", base_gas["time"].min(), "->", base_gas["time"].max())
-    print("Features usadas:", features)
+for gas, (sensor, ref) in pares.items():
+    if sensor in df.columns and ref in df.columns:
+        temp = df[[sensor, ref]].dropna()
 
-# ============================================================
-# 17) RESUMO FINAL
-# ============================================================
+        if len(temp) > 10:
+            corr = temp[sensor].corr(temp[ref])
+            print(f"{gas}: correlação {sensor} x {ref} = {corr:.3f}")
+        else:
+            print(f"{gas}: dados insuficientes para correlação")
 
-print("\n================ RESUMO FINAL ================")
-print("Base completa:", df_final.shape)
-print("Período final:", df_final["time"].min(), "->", df_final["time"].max())
-print("Arquivo salvo: envcity_preprocessado_5min_prophet_sem_gaps.csv")
-print("Resumo Prophet: resumo_outliers_prophet_5min.csv")
+print("\n" + "="*60)
+print("5. VERIFICAÇÃO FINAL")
+print("="*60)
+
+print("""
+A base está boa para calibrar se:
+
+- frequência principal for 5 minutos;
+- duplicados em time = 0;
+- houver mais de 1000 linhas completas por gás;
+- treino, validação e teste tiverem dados para todos os gases;
+- NaN nas colunas principais não for excessivo;
+- correlação sensor x referência não for totalmente próxima de zero;
+- pin_temp e pin_umid estiverem preenchidas.
+""")
