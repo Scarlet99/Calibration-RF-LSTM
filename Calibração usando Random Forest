@@ -1,7 +1,7 @@
 # ============================================================
 # RANDOM FOREST - CALIBRAÇÃO O3
 # DIVISÃO ALEATÓRIA 60/20/20
-# BASE: envcity_preprocessado_5min_prophet_sem_gaps.csv
+# BASE: base_5min_preprocessada_final.csv
 # ============================================================
 
 import pandas as pd
@@ -10,38 +10,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.pipeline import make_pipeline
-from sklearn.model_selection import (
-    train_test_split,
-    GridSearchCV,
-    RepeatedKFold
-)
-
-from sklearn.metrics import (
-    r2_score,
-    mean_squared_error,
-    mean_absolute_error
-)
+from sklearn.model_selection import train_test_split, GridSearchCV, RepeatedKFold
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 # ============================================================
-# 1) LEITURA DA BASE
+# 1) CONFIGURAÇÕES
 # ============================================================
 
-arquivo = "envcity_preprocessado_5min_prophet_sem_gaps.csv"
-
-df = pd.read_csv(arquivo)
-
-df["time"] = pd.to_datetime(df["time"], errors="coerce")
-df = df.dropna(subset=["time"])
-
-print("=" * 50)
-print("BASE")
-print("=" * 50)
-print(df.shape)
-
-# ============================================================
-# 2) ENTRADAS E SAÍDA - O3
-# ============================================================
+arquivo = "base_5min_preprocessada_final.csv"
 
 target = "iag_o3"
 
@@ -53,31 +29,69 @@ features = [
     "pin_umid"
 ]
 
-features = [f for f in features if f in df.columns]
+# ============================================================
+# 2) LEITURA DA BASE
+# ============================================================
 
-base = df[["time"] + features + [target]].copy()
+df = pd.read_csv(arquivo, low_memory=False)
+
+df["time"] = pd.to_datetime(df["time"], errors="coerce")
+df = df.dropna(subset=["time"])
+df = df.sort_values("time")
+
+print("=" * 60)
+print("BASE ORIGINAL")
+print("=" * 60)
+print("Shape:", df.shape)
+print("Período:", df["time"].min(), "até", df["time"].max())
+
+# ============================================================
+# 3) VERIFICAÇÃO DAS COLUNAS
+# ============================================================
+
+colunas_necessarias = ["time"] + features + [target]
+
+colunas_faltando = [
+    col for col in colunas_necessarias if col not in df.columns
+]
+
+if len(colunas_faltando) > 0:
+    print("\nERRO: As seguintes colunas não existem na base:")
+    print(colunas_faltando)
+    print("\nColunas disponíveis:")
+    print(df.columns.tolist())
+    raise SystemExit
+
+# ============================================================
+# 4) SELEÇÃO E LIMPEZA DOS DADOS
+# ============================================================
+
+base = df[colunas_necessarias].copy()
+
+for col in features + [target]:
+    base[col] = pd.to_numeric(base[col], errors="coerce")
 
 base = base.replace([np.inf, -np.inf], np.nan)
 base = base.dropna(subset=features + [target])
 
-print("\nFeatures:")
-print(features)
+base = base.sort_values("time").reset_index(drop=True)
 
-print("\nTarget:")
-print(target)
-
-print("\nShape após limpeza:")
-print(base.shape)
+print("\n" + "=" * 60)
+print("BASE APÓS LIMPEZA")
+print("=" * 60)
+print("Shape:", base.shape)
+print("Features usadas:", features)
+print("Target:", target)
 
 # ============================================================
-# 3) MATRIZES X E Y
+# 5) MATRIZES X E Y
 # ============================================================
 
 X = base[features]
 y = base[target]
 
 # ============================================================
-# 4) SPLIT ALEATÓRIO 60/20/20
+# 6) SPLIT ALEATÓRIO 60/20/20
 # ============================================================
 
 X_train, X_temp, y_train, y_temp = train_test_split(
@@ -96,50 +110,29 @@ X_valid, X_test, y_valid, y_test = train_test_split(
     shuffle=True
 )
 
-print("\n==============================")
+print("\n" + "=" * 60)
 print("DIVISÃO DOS DADOS")
-print("==============================")
+print("=" * 60)
 print("Treino:", X_train.shape)
 print("Validação:", X_valid.shape)
 print("Teste:", X_test.shape)
 
 # ============================================================
-# 5) RANDOM FOREST + GRID SEARCH
+# 7) RANDOM FOREST + GRID SEARCH
 # ============================================================
 
-param_grid = {
-    "randomforestregressor__n_estimators": [
-        100,
-        300,
-        500
-    ],
-
-    "randomforestregressor__max_depth": [
-        10,
-        20,
-        None
-    ],
-
-    "randomforestregressor__min_samples_split": [
-        2,
-        5
-    ],
-
-    "randomforestregressor__min_samples_leaf": [
-        1,
-        2
-    ],
-
-    "randomforestregressor__max_features": [
-        "sqrt"
-    ]
-}
-
-modelo = make_pipeline(
-    RandomForestRegressor(
-        random_state=42
-    )
+modelo = RandomForestRegressor(
+    random_state=42,
+    n_jobs=-1
 )
+
+param_grid = {
+    "n_estimators": [100, 300, 500],
+    "max_depth": [10, 20, None],
+    "min_samples_split": [2, 5],
+    "min_samples_leaf": [1, 2],
+    "max_features": ["sqrt"]
+}
 
 kfold = RepeatedKFold(
     n_splits=5,
@@ -151,24 +144,23 @@ gs = GridSearchCV(
     estimator=modelo,
     param_grid=param_grid,
     cv=kfold,
+    scoring="r2",
     n_jobs=-1,
     verbose=2,
-    return_train_score=True,
-    scoring="r2"
+    return_train_score=True
 )
 
-print("\nTreinando modelo...")
-
+print("\nTreinando modelo Random Forest para O3...")
 gs.fit(X_train, y_train)
 
 print("\nMelhores parâmetros:")
 print(gs.best_params_)
 
-print("\nMelhor R² CV:")
+print("\nMelhor R² médio no CV:")
 print(gs.best_score_)
 
 # ============================================================
-# 6) PREVISÕES
+# 8) PREVISÕES
 # ============================================================
 
 pred_train = gs.predict(X_train)
@@ -176,75 +168,71 @@ pred_valid = gs.predict(X_valid)
 pred_test = gs.predict(X_test)
 
 # ============================================================
-# 7) MÉTRICAS
+# 9) FUNÇÃO DE MÉTRICAS
 # ============================================================
 
-def metricas(y_real, y_pred):
-
+def calcular_metricas(y_real, y_pred):
     rmse = np.sqrt(mean_squared_error(y_real, y_pred))
     mse = mean_squared_error(y_real, y_pred)
     mae = mean_absolute_error(y_real, y_pred)
     r2 = r2_score(y_real, y_pred)
 
-    pearson = np.corrcoef(y_real, y_pred)[0, 1]
+    if len(y_real) > 1:
+        pearson = np.corrcoef(y_real, y_pred)[0, 1]
+    else:
+        pearson = np.nan
 
     return rmse, mse, mae, r2, pearson
 
+# ============================================================
+# 10) RESULTADOS
+# ============================================================
 
-resultado_final = []
+resultados = []
 
 for fase, y_real, y_pred in [
-    ("treino", y_train, pred_train),
-    ("validacao", y_valid, pred_valid),
-    ("teste", y_test, pred_test)
+    ("Treino", y_train, pred_train),
+    ("Validação", y_valid, pred_valid),
+    ("Teste", y_test, pred_test)
 ]:
+    rmse, mse, mae, r2, pearson = calcular_metricas(y_real, y_pred)
 
-    rmse, mse, mae, r2, pearson = metricas(y_real, y_pred)
+    resultados.append({
+        "Gas": "O3",
+        "Fase": fase,
+        "RMSE": rmse,
+        "MSE": mse,
+        "MAE": mae,
+        "R2": r2,
+        "Pearson": pearson,
+        "N": len(y_real)
+    })
 
-    resultado_final.append([
-        fase,
-        rmse,
-        mse,
-        mae,
-        r2,
-        pearson
-    ])
+resultado_final = pd.DataFrame(resultados)
 
-resultado_final = pd.DataFrame(
-    resultado_final,
-    columns=[
-        "fase",
-        "RMSE",
-        "MSE",
-        "MAE",
-        "R2",
-        "Pearson"
-    ]
-)
-
-print("\n==============================")
-print("RESULTADOS")
-print("==============================")
+print("\n" + "=" * 60)
+print("RESULTADOS FINAIS")
+print("=" * 60)
 print(resultado_final)
 
 resultado_final.to_csv(
-    "resultados_rf_o3.csv",
+    "resultados_rf_o3_base_5min.csv",
     index=False
 )
 
 # ============================================================
-# 8) RESULTADOS GRID SEARCH
+# 11) SALVAR RESULTADOS DO GRID SEARCH
 # ============================================================
 
-tabela_treino = pd.DataFrame(gs.cv_results_)
+grid_resultados = pd.DataFrame(gs.cv_results_)
 
-tabela_treino.to_csv(
-    "gridsearch_rf_o3.csv",
+grid_resultados.to_csv(
+    "gridsearch_rf_o3_base_5min.csv",
     index=False
 )
 
 # ============================================================
-# 9) REAL VS PREDITO
+# 12) REAL VS PREDITO - TESTE
 # ============================================================
 
 plt.figure(figsize=(8, 6))
@@ -252,34 +240,78 @@ plt.figure(figsize=(8, 6))
 sns.regplot(
     x=y_test,
     y=pred_test,
-    scatter_kws={"alpha": 0.5}
+    scatter_kws={"alpha": 0.5},
+    line_kws={"color": "red"}
 )
 
-plt.xlabel("O₃ Real")
-plt.ylabel("O₃ Predito")
-plt.title("Random Forest - O₃")
+plt.xlabel("O₃ real - estação de referência")
+plt.ylabel("O₃ calibrado - Random Forest")
+plt.title("Random Forest - O₃: Real vs Calibrado")
 
 plt.grid(True)
 plt.tight_layout()
 
 plt.savefig(
-    "rf_o3_real_vs_predito.png",
+    "rf_o3_real_vs_calibrado_base_5min.png",
     dpi=300
 )
 
 plt.show()
 
 # ============================================================
-# 10) IMPORTÂNCIA DAS VARIÁVEIS
+# 13) SÉRIE TEMPORAL DO CONJUNTO DE TESTE
 # ============================================================
 
-rf = gs.best_estimator_.named_steps[
-    "randomforestregressor"
-]
+teste = base.loc[y_test.index, ["time", target]].copy()
+teste["O3_real"] = y_test.values
+teste["O3_calibrado"] = pred_test
+
+teste = teste.sort_values("time")
+
+teste.to_csv(
+    "predicoes_rf_o3_teste_base_5min.csv",
+    index=False
+)
+
+plt.figure(figsize=(14, 5))
+
+plt.plot(
+    teste["time"],
+    teste["O3_real"],
+    label="O₃ real",
+    linewidth=1
+)
+
+plt.plot(
+    teste["time"],
+    teste["O3_calibrado"],
+    label="O₃ calibrado - RF",
+    linewidth=1
+)
+
+plt.xlabel("Tempo")
+plt.ylabel("Concentração de O₃")
+plt.title("Random Forest - O₃: Série temporal do teste")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+
+plt.savefig(
+    "rf_o3_serie_temporal_teste_base_5min.png",
+    dpi=300
+)
+
+plt.show()
+
+# ============================================================
+# 14) IMPORTÂNCIA DAS VARIÁVEIS
+# ============================================================
+
+rf_final = gs.best_estimator_
 
 importancias = pd.DataFrame({
     "Variavel": features,
-    "Importancia": rf.feature_importances_
+    "Importancia": rf_final.feature_importances_
 })
 
 importancias = importancias.sort_values(
@@ -287,13 +319,13 @@ importancias = importancias.sort_values(
     ascending=False
 )
 
-print("\n==============================")
+print("\n" + "=" * 60)
 print("IMPORTÂNCIA DAS VARIÁVEIS")
-print("==============================")
+print("=" * 60)
 print(importancias)
 
 importancias.to_csv(
-    "importancia_variaveis_rf_o3.csv",
+    "importancia_variaveis_rf_o3_base_5min.csv",
     index=False
 )
 
@@ -305,24 +337,28 @@ sns.barplot(
     y="Variavel"
 )
 
-plt.title("Importância das Variáveis - RF O₃")
+plt.title("Importância das Variáveis - Random Forest O₃")
+plt.xlabel("Importância")
+plt.ylabel("Variável")
 
 plt.tight_layout()
 
 plt.savefig(
-    "importancia_variaveis_rf_o3.png",
+    "importancia_variaveis_rf_o3_base_5min.png",
     dpi=300
 )
 
 plt.show()
 
 # ============================================================
-# 11) RESUMO FINAL
+# 15) RESUMO FINAL
 # ============================================================
 
 print("\nArquivos gerados:")
-print("resultados_rf_o3.csv")
-print("gridsearch_rf_o3.csv")
-print("importancia_variaveis_rf_o3.csv")
-print("rf_o3_real_vs_predito.png")
-print("importancia_variaveis_rf_o3.png")
+print("resultados_rf_o3_base_5min.csv")
+print("gridsearch_rf_o3_base_5min.csv")
+print("predicoes_rf_o3_teste_base_5min.csv")
+print("importancia_variaveis_rf_o3_base_5min.csv")
+print("rf_o3_real_vs_calibrado_base_5min.png")
+print("rf_o3_serie_temporal_teste_base_5min.png")
+print("importancia_variaveis_rf_o3_base_5min.png")
