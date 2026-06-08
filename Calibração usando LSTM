@@ -1,7 +1,7 @@
 # ============================================================
 # LSTM - CALIBRAÇÃO CO COM JANELA TEMPORAL 24
 # SPLIT ALEATÓRIO 60/20/20
-# BASE: envcity_preprocessado_5min_prophet_sem_gaps.csv
+# BASE: base_5min_preprocessada_final.csv
 # ============================================================
 
 import pandas as pd
@@ -13,7 +13,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 
@@ -21,8 +21,9 @@ from tensorflow.keras.optimizers import Adam
 # CONFIGURAÇÕES
 # ============================================================
 
-arquivo = "envcity_preprocessado_5min_prophet_sem_gaps.csv"
+arquivo = "base_5min_preprocessada_final.csv"
 
+gas = "CO"
 target = "iag_co"
 
 features = [
@@ -36,33 +37,44 @@ features = [
 janela = 24  # 24 registros de 5 min = 2 horas
 
 # ============================================================
-# LEITURA DA BASE
+# LEITURA E ORGANIZAÇÃO DA BASE
 # ============================================================
 
-df = pd.read_csv(arquivo)
+df = pd.read_csv(arquivo, low_memory=False)
+
+df.columns = df.columns.str.strip()
+
+if "time" not in df.columns:
+    raise ValueError("A coluna 'time' não foi encontrada na base.")
 
 df["time"] = pd.to_datetime(df["time"], errors="coerce")
 df = df.dropna(subset=["time"])
 df = df.sort_values("time").reset_index(drop=True)
 
-features = [f for f in features if f in df.columns]
+colunas_necessarias = features + [target]
+
+faltando = [c for c in colunas_necessarias if c not in df.columns]
+
+if faltando:
+    raise ValueError(f"As seguintes colunas não existem na base: {faltando}")
 
 base = df[["time"] + features + [target]].copy()
+
+for col in features + [target]:
+    base[col] = pd.to_numeric(base[col], errors="coerce")
+
 base = base.replace([np.inf, -np.inf], np.nan)
 base = base.dropna(subset=features + [target])
 base = base.sort_values("time").reset_index(drop=True)
 
 print("=" * 60)
-print("BASE")
+print("BASE FINAL")
 print("=" * 60)
+print("Arquivo:", arquivo)
 print("Shape:", base.shape)
 print("Período:", base["time"].min(), "até", base["time"].max())
-
-print("\nFeatures usadas:")
-print(features)
-
-print("\nTarget:")
-print(target)
+print("Features:", features)
+print("Target:", target)
 
 # ============================================================
 # NORMALIZAÇÃO
@@ -84,7 +96,7 @@ def criar_janelas(X, y, tempos, janela):
     tempos_seq = []
 
     for i in range(janela, len(X)):
-        X_seq.append(X[i-janela:i])
+        X_seq.append(X[i - janela:i])
         y_seq.append(y[i])
         tempos_seq.append(tempos.iloc[i])
 
@@ -122,7 +134,8 @@ X_valid, X_test, y_valid, y_test, tempo_valid, tempo_test = train_test_split(
     shuffle=True
 )
 
-print("\nTreino:", X_train.shape)
+print("\nDivisão dos dados:")
+print("Treino:", X_train.shape)
 print("Validação:", X_valid.shape)
 print("Teste:", X_test.shape)
 
@@ -130,16 +143,13 @@ print("Teste:", X_test.shape)
 # MODELO LSTM
 # ============================================================
 
-modelo = Sequential()
-
-modelo.add(LSTM(
-    units=64,
-    input_shape=(X_train.shape[1], X_train.shape[2])
-))
-
-modelo.add(Dropout(0.3))
-modelo.add(Dense(32, activation="relu"))
-modelo.add(Dense(1))
+modelo = Sequential([
+    Input(shape=(X_train.shape[1], X_train.shape[2])),
+    LSTM(64),
+    Dropout(0.3),
+    Dense(32, activation="relu"),
+    Dense(1)
+])
 
 modelo.compile(
     optimizer=Adam(learning_rate=0.0005),
@@ -188,7 +198,7 @@ pred_test_real = scaler_y.inverse_transform(pred_test)
 # MÉTRICAS
 # ============================================================
 
-def metricas(y_real, y_pred):
+def calcular_metricas(y_real, y_pred):
     rmse = np.sqrt(mean_squared_error(y_real, y_pred))
     mse = mean_squared_error(y_real, y_pred)
     mae = mean_absolute_error(y_real, y_pred)
@@ -197,23 +207,26 @@ def metricas(y_real, y_pred):
     if np.std(y_real) == 0 or np.std(y_pred) == 0:
         pearson = np.nan
     else:
-        pearson = np.corrcoef(y_real.flatten(), y_pred.flatten())[0, 1]
+        pearson = np.corrcoef(
+            y_real.flatten(),
+            y_pred.flatten()
+        )[0, 1]
 
     return rmse, mse, mae, r2, pearson
 
-resultado_final = []
+resultados = []
 
 for fase, y_real, y_pred in [
-    ("treino", y_train_real, pred_train_real),
-    ("validacao", y_valid_real, pred_valid_real),
-    ("teste", y_test_real, pred_test_real)
+    ("Treino", y_train_real, pred_train_real),
+    ("Validação", y_valid_real, pred_valid_real),
+    ("Teste", y_test_real, pred_test_real)
 ]:
-    rmse, mse, mae, r2, pearson = metricas(y_real, y_pred)
-    resultado_final.append([fase, rmse, mse, mae, r2, pearson])
+    rmse, mse, mae, r2, pearson = calcular_metricas(y_real, y_pred)
+    resultados.append([gas, fase, rmse, mse, mae, r2, pearson, len(y_real)])
 
 resultado_final = pd.DataFrame(
-    resultado_final,
-    columns=["fase", "RMSE", "MSE", "MAE", "R2", "Pearson"]
+    resultados,
+    columns=["Gas", "Fase", "RMSE", "MSE", "MAE", "R2", "Pearson", "N"]
 )
 
 print("\n==============================")
@@ -224,7 +237,7 @@ print(resultado_final)
 resultado_final.to_csv("resultados_lstm_co_janela24.csv", index=False)
 
 # ============================================================
-# GRÁFICO: CURVA DE TREINAMENTO
+# GRÁFICO 1 - CURVA DE TREINAMENTO
 # ============================================================
 
 plt.figure(figsize=(8, 5))
@@ -240,7 +253,7 @@ plt.savefig("lstm_co_janela24_curva_treinamento.png", dpi=300)
 plt.show()
 
 # ============================================================
-# GRÁFICO: REAL VS PREDITO - TESTE
+# GRÁFICO 2 - REAL VS PREDITO
 # ============================================================
 
 plt.figure(figsize=(8, 6))
@@ -260,7 +273,7 @@ plt.savefig("lstm_co_janela24_real_vs_predito.png", dpi=300)
 plt.show()
 
 # ============================================================
-# GRÁFICO: SÉRIE TEMPORAL REAL VS PREDITO - TESTE
+# GRÁFICO 3 - SÉRIE TEMPORAL DO TESTE
 # ============================================================
 
 ordem = np.argsort(tempo_test)
@@ -270,7 +283,6 @@ y_test_ord = y_test_real.flatten()[ordem]
 pred_test_ord = pred_test_real.flatten()[ordem]
 
 plt.figure(figsize=(14, 6))
-
 plt.plot(
     tempo_test_ord,
     y_test_ord,
@@ -295,7 +307,7 @@ plt.savefig("lstm_co_janela24_serie_teste.png", dpi=300)
 plt.show()
 
 # ============================================================
-# GRÁFICO: REFERÊNCIA VS SENSOR DE BAIXO CUSTO
+# GRÁFICO 4 - REFERÊNCIA VS SENSOR DE BAIXO CUSTO
 # ============================================================
 
 sensor_baixo_custo = "e2sp_co"
@@ -304,7 +316,6 @@ comparacao = base[["time", target, sensor_baixo_custo]].copy()
 comparacao = comparacao.sort_values("time")
 
 plt.figure(figsize=(14, 6))
-
 plt.plot(
     comparacao["time"],
     comparacao[target],
